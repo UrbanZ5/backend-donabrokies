@@ -139,24 +139,41 @@ async function ensureAdminCredentials() {
 
             if (error) {
                 console.error('❌ Erro ao criar credenciais:', error);
+                return false;
             } else {
                 console.log('✅ Credenciais admin criadas com sucesso!');
                 console.log('📋 Usuário: admin');
                 console.log('🔑 Senha: admin123');
+                console.log('🔐 Senha criptografada:', encryptedPassword);
+                return true;
             }
         } else {
             console.log('✅ Credenciais admin já existem');
-            console.log('📋 Usuário: admin');
-            console.log('🔑 Senha configurada');
+            console.log('📋 Usuário:', existingCreds.username);
+            console.log('🔑 Senha no banco:', existingCreds.password);
+            console.log('🔐 Senha criptografada no banco:', existingCreds.encrypted_password);
+            
+            // Verificar se a senha criptografada está correta
+            const testPassword = 'admin123';
+            const testEncrypted = simpleEncrypt(testPassword);
+            console.log('🔍 Testando criptografia:', {
+                senha_teste: testPassword,
+                criptografado_teste: testEncrypted,
+                criptografado_banco: existingCreds.encrypted_password,
+                coincide: testEncrypted === existingCreds.encrypted_password
+            });
+            
+            return true;
         }
     } catch (error) {
         console.error('❌ Erro ao verificar credenciais:', error);
+        return false;
     }
 }
 
 // ENDPOINTS DA API
 
-// Autenticação
+// Autenticação - CORRIGIDA
 app.post("/api/auth/login", async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -173,19 +190,35 @@ app.post("/api/auth/login", async (req, res) => {
             .eq('username', username)
             .single();
 
-        if (error || !credentials) {
+        if (error) {
+            console.log('❌ Erro ao buscar credenciais:', error.message);
+            return res.status(401).json({ error: "Credenciais inválidas" });
+        }
+
+        if (!credentials) {
             console.log('❌ Credenciais não encontradas para:', username);
             return res.status(401).json({ error: "Credenciais inválidas" });
         }
 
-        console.log('🔍 Credencial encontrada, verificando senha...');
+        console.log('🔍 Credencial encontrada:', {
+            usuario: credentials.username,
+            senha_banco: credentials.password,
+            senha_criptografada_banco: credentials.encrypted_password
+        });
         
-        // Verificar senha descriptografada
+        // Verificar senha em texto plano (mais simples)
+        const isPlainPasswordValid = password === credentials.password;
+        
+        // Verificar senha criptografada
         const encryptedInput = simpleEncrypt(password);
         const isPasswordValid = encryptedInput === credentials.encrypted_password;
-        
-        // Também verificar senha em texto plano (para compatibilidade)
-        const isPlainPasswordValid = password === credentials.password;
+
+        console.log('🔐 Verificação de senha:', {
+            senha_digitada: password,
+            senha_criptografada_digitada: encryptedInput,
+            valida_texto: isPlainPasswordValid,
+            valida_cripto: isPasswordValid
+        });
 
         if (isPasswordValid || isPlainPasswordValid) {
             console.log('✅ Login bem-sucedido para:', username);
@@ -564,6 +597,17 @@ app.get("/api/debug/credentials", async (req, res) => {
     } catch (error) {
         res.json({ credentials: [], error: error.message });
     }
+});
+
+// Endpoint para testar criptografia
+app.get("/api/debug/encrypt/:text", (req, res) => {
+    const text = req.params.text;
+    const encrypted = simpleEncrypt(text);
+    res.json({
+        original: text,
+        encrypted: encrypted,
+        decrypted: simpleDecrypt(encrypted)
+    });
 });
 
 // Inicializar servidor

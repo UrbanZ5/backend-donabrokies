@@ -17,13 +17,13 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-// Cache apenas para produtos
+// CORREÇÃO: Cache removido para categorias
 let cache = {
   products: null,
   productsTimestamp: 0
 };
 
-const CACHE_DURATION = 2 * 60 * 1000;
+const CACHE_DURATION = 2 * 60 * 1000; // 2 minutos - APENAS PARA PRODUTOS
 
 // Função para criptografar
 function simpleEncrypt(text) {
@@ -35,7 +35,7 @@ function simpleDecrypt(encrypted) {
   return Buffer.from(encrypted.split('').reverse().join(''), 'base64').toString('utf8');
 }
 
-// Normalizar categorias
+// Normalizar categorias - CORRIGIDA
 function normalizeCategories(categories) {
   if (!Array.isArray(categories)) return [];
   
@@ -63,25 +63,26 @@ function normalizeProducts(products) {
   if (!Array.isArray(products)) return [];
   
   return products.map(product => {
-    // Converter estrutura antiga para nova estrutura
+    // Converter estrutura antiga (cores/sizes) para nova estrutura (sabores/quantity)
     if (product.colors && Array.isArray(product.colors)) {
       return {
         ...product,
-        flavors: product.colors.map(color => ({
+        sabores: product.colors.map(color => ({
           name: color.name || 'Sem nome',
           image: color.image || 'https://via.placeholder.com/400x300',
-          stock: color.sizes ? color.sizes.reduce((total, size) => total + (size.stock || 0), 0) : (color.stock || 0)
+          quantity: color.sizes ? color.sizes.reduce((total, size) => total + (size.stock || 0), 0) : (color.quantity || 0)
         }))
       };
     }
     
-    if (product.flavors && Array.isArray(product.flavors)) {
+    // Se já tem sabores, garantir que está no formato correto
+    if (product.sabores && Array.isArray(product.sabores)) {
       return {
         ...product,
-        flavors: product.flavors.map(flavor => ({
-          name: flavor.name || 'Sem nome',
-          image: flavor.image || 'https://via.placeholder.com/400x300',
-          stock: flavor.stock || 0
+        sabores: product.sabores.map(sabor => ({
+          name: sabor.name || 'Sem nome',
+          image: sabor.image || 'https://via.placeholder.com/400x300',
+          quantity: sabor.quantity || 0
         }))
       };
     }
@@ -90,13 +91,12 @@ function normalizeProducts(products) {
   });
 }
 
-// Verificar autenticação - CORREÇÃO AQUI
+// Verificar autenticação
 function checkAuth(token) {
-  // Token fixo para desenvolvimento
   return token === "authenticated_admin_token";
 }
 
-// Limpar cache
+// Limpar cache - APENAS PRODUTOS AGORA
 function clearCache() {
   cache = {
     products: null,
@@ -123,7 +123,7 @@ async function migrateDataToSupabase() {
         .from('admin_credentials')
         .insert([{
           username: 'admin',
-          password: adminPassword,
+          password: 'admin123',
           encrypted_password: encryptedPassword
         }]);
 
@@ -138,32 +138,49 @@ async function migrateDataToSupabase() {
 
 // ENDPOINTS DA API
 
-// Autenticação - CORREÇÃO AQUI
+// Autenticação
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { username, password } = req.body;
     
     console.log('Tentativa de login:', username);
 
-    // Verificação direta para desenvolvimento
-    if (username === 'admin' && password === 'admin123') {
-      return res.json({ 
-        success: true, 
-        token: "authenticated_admin_token", 
-        user: { username: 'admin' } 
-      });
+    const { data: credentials, error } = await supabase
+      .from('admin_credentials')
+      .select('*')
+      .eq('username', username)
+      .single();
+
+    if (error || !credentials) {
+      return res.status(401).json({ error: "Credenciais inválidas" });
     }
 
-    // Se chegou aqui, credenciais inválidas
-    return res.status(401).json({ error: "Credenciais inválidas" });
+    const encryptedPassword = simpleEncrypt(password);
     
+    if (encryptedPassword === credentials.encrypted_password) {
+      res.json({ 
+        success: true, 
+        token: "authenticated_admin_token", 
+        user: { username: username } 
+      });
+    } else {
+      if (password === credentials.password) {
+        res.json({ 
+          success: true, 
+          token: "authenticated_admin_token", 
+          user: { username: username } 
+        });
+      } else {
+        res.status(401).json({ error: "Credenciais inválidas" });
+      }
+    }
   } catch (error) {
     console.error("Erro no login:", error);
     res.status(500).json({ error: "Erro no processo de login" });
   }
 });
 
-// Buscar produtos
+// Buscar produtos COM CACHE
 app.get("/api/products", async (req, res) => {
   try {
     // Cache headers para velocidade
@@ -201,10 +218,11 @@ app.get("/api/products", async (req, res) => {
   }
 });
 
-// Buscar categorias
+// Buscar categorias SEM CACHE - CORRIGIDO
 app.get("/api/categories", async (req, res) => {
   try {
-    console.log('🔄 Buscando categorias do banco...');
+    // REMOVIDO CACHE PARA CATEGORIAS
+    console.log('🔄 Buscando categorias SEMPRE DO BANCO (sem cache)...');
     
     const { data: categories, error } = await supabase
       .from('categories')
@@ -226,6 +244,7 @@ app.get("/api/categories", async (req, res) => {
       normalizedCategories = [];
     }
 
+    console.log('📦 Retornando categorias:', normalizedCategories);
     res.json({ categories: normalizedCategories });
   } catch (error) {
     console.error("❌ Erro ao buscar categorias:", error);
@@ -257,7 +276,7 @@ app.post("/api/products", async (req, res) => {
       throw deleteError;
     }
 
-    // Inserir os novos produtos em lote
+    // Inserir os novos produtos em lote (mais eficiente)
     if (normalizedProducts.length > 0) {
       const productsToInsert = normalizedProducts.map(product => ({
         title: product.title,
@@ -265,7 +284,7 @@ app.post("/api/products", async (req, res) => {
         price: product.price,
         description: product.description,
         status: product.status,
-        flavors: product.flavors
+        sabores: product.sabores
       }));
 
       const { error: insertError } = await supabase
@@ -289,7 +308,7 @@ app.post("/api/products", async (req, res) => {
   }
 });
 
-// Adicionar categoria individual
+// Adicionar categoria individual - CORRIGIDO
 app.post("/api/categories/add", async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -305,6 +324,7 @@ app.post("/api/categories/add", async (req, res) => {
 
     console.log(`➕ Adicionando categoria: ${category.name} (ID: ${category.id})`);
 
+    // Usar upsert em vez de insert para evitar erro se já existir
     const { data, error } = await supabase
       .from('categories')
       .upsert([{
@@ -312,7 +332,8 @@ app.post("/api/categories/add", async (req, res) => {
         name: category.name,
         description: category.description || `Categoria de ${category.name}`
       }], {
-        onConflict: 'id'
+        onConflict: 'id',
+        ignoreDuplicates: false
       });
 
     if (error) {
@@ -328,7 +349,7 @@ app.post("/api/categories/add", async (req, res) => {
   }
 });
 
-// Excluir categoria individual
+// Excluir categoria individual - CORRIGIDO
 app.delete("/api/categories/:categoryId", async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -411,7 +432,7 @@ app.delete("/api/categories/:categoryId", async (req, res) => {
   }
 });
 
-// Salvar categorias
+// Salvar categorias - CORRIGIDO
 app.post("/api/categories", async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -467,7 +488,7 @@ app.post("/api/categories", async (req, res) => {
   }
 });
 
-// Verificar autenticação - CORREÇÃO AQUI
+// Verificar autenticação
 app.get("/api/auth/verify", async (req, res) => {
   try {
     const token = req.headers.authorization?.replace("Bearer ", "");
@@ -486,7 +507,7 @@ app.get("/api/auth/verify", async (req, res) => {
 // Health check
 app.get("/", (req, res) => {
   res.json({ 
-    message: "🚀 Backend Urban Z SISTEMA DE QUANTIDADES está funcionando!", 
+    message: "🚀 Backend Urban Z SABORES está funcionando!", 
     status: "OK",
     cache: "Ativo apenas para produtos",
     performance: "Turbo",
@@ -494,7 +515,7 @@ app.get("/", (req, res) => {
   });
 });
 
-// Endpoint para limpar cache manualmente
+// Endpoint para limpar cache manualmente - APENAS PRODUTOS AGORA
 app.post("/api/cache/clear", (req, res) => {
   clearCache();
   res.json({ success: true, message: "Cache de produtos limpo com sucesso" });
@@ -522,9 +543,8 @@ app.get("/api/debug/categories", async (req, res) => {
 // Inicializar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-  console.log(`🚀 Servidor SISTEMA DE QUANTIDADES rodando em http://localhost:${PORT}`);
+  console.log(`🚀 Servidor SABORES rodando em http://localhost:${PORT}`);
   console.log(`💾 Cache ativo APENAS para produtos: ${CACHE_DURATION/1000}s`);
   console.log(`✅ Categorias SEM CACHE - sempre atualizadas`);
-  console.log(`🔑 Credenciais: admin / admin123`);
   await migrateDataToSupabase();
 });

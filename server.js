@@ -76,7 +76,8 @@ function normalizeProducts(products) {
                 sabores: product.colors.map(color => ({
                     name: color.name || 'Sem nome',
                     image: color.image || 'https://via.placeholder.com/400x300',
-                    quantity: color.sizes ? color.sizes.reduce((total, size) => total + (size.stock || 0), 0) : (color.quantity || 0)
+                    quantity: color.sizes ? color.sizes.reduce((total, size) => total + (size.stock || 0), 0) : (color.quantity || 0),
+                    description: color.description || ''
                 }))
             };
         }
@@ -88,7 +89,8 @@ function normalizeProducts(products) {
                 sabores: product.sabores.map(sabor => ({
                     name: sabor.name || 'Sem nome',
                     image: sabor.image || 'https://via.placeholder.com/400x300',
-                    quantity: sabor.quantity || 0
+                    quantity: sabor.quantity || 0,
+                    description: sabor.description || ''
                 }))
             };
         }
@@ -253,6 +255,7 @@ app.get("/api/products", async (req, res) => {
         const { data: products, error } = await supabase
             .from('products')
             .select('*')
+            .order('display_order', { ascending: true, nullsFirst: false })
             .order('id');
 
         if (error) {
@@ -334,7 +337,8 @@ app.post("/api/products", async (req, res) => {
                 price: product.price,
                 description: product.description,
                 status: product.status,
-                sabores: product.sabores
+                sabores: product.sabores,
+                display_order: product.display_order || 0
             }));
 
             const { error: insertError } = await supabase

@@ -173,6 +173,135 @@ async function ensureAdminCredentials() {
     }
 }
 
+// NOVA FUNÇÃO: Atualização de estoque otimizada para múltiplos itens
+async function updateStockForOrder(items) {
+    try {
+        console.log('🔄 Iniciando atualização de estoque para pedido com', items.length, 'itens');
+        
+        if (!items || !Array.isArray(items) || items.length === 0) {
+            console.log('⚠️ Nenhum item para atualizar');
+            return { success: true, message: "Nenhum item para atualizar" };
+        }
+
+        // Buscar todos os produtos de uma vez
+        const productIds = [...new Set(items.map(item => item.id))];
+        console.log('📦 Produtos únicos a serem atualizados:', productIds);
+
+        const { data: currentProducts, error: fetchError } = await supabase
+            .from('products')
+            .select('*')
+            .in('id', productIds);
+
+        if (fetchError) {
+            console.error('❌ Erro ao buscar produtos:', fetchError);
+            throw new Error(`Erro ao buscar produtos: ${fetchError.message}`);
+        }
+
+        if (!currentProducts || currentProducts.length === 0) {
+            console.log('⚠️ Nenhum produto encontrado para os IDs:', productIds);
+            return { success: true, message: "Nenhum produto encontrado para atualizar" };
+        }
+
+        console.log(`✅ ${currentProducts.length} produtos encontrados para atualização`);
+
+        // Criar mapa para acesso rápido aos produtos
+        const productsMap = new Map();
+        currentProducts.forEach(product => {
+            productsMap.set(product.id, { ...product });
+        });
+
+        // Atualizar estoque na memória
+        const updates = [];
+        const stockUpdates = [];
+
+        items.forEach(orderItem => {
+            const product = productsMap.get(orderItem.id);
+            
+            if (product && product.sabores && product.sabores[orderItem.saborIndex]) {
+                const sabor = product.sabores[orderItem.saborIndex];
+                const oldQuantity = sabor.quantity || 0;
+                const newQuantity = Math.max(0, oldQuantity - orderItem.quantity);
+                
+                if (oldQuantity !== newQuantity) {
+                    product.sabores[orderItem.saborIndex].quantity = newQuantity;
+                    updates.push({
+                        productId: product.id,
+                        saborName: sabor.name,
+                        oldQuantity,
+                        newQuantity,
+                        quantityOrdered: orderItem.quantity
+                    });
+                    
+                    stockUpdates.push({
+                        product_id: product.id,
+                        sabor_index: orderItem.saborIndex,
+                        old_stock: oldQuantity,
+                        new_stock: newQuantity,
+                        quantity_ordered: orderItem.quantity,
+                        product_title: product.title,
+                        sabor_name: sabor.name
+                    });
+                }
+            }
+        });
+
+        if (updates.length === 0) {
+            console.log('ℹ️ Nenhuma atualização de estoque necessária');
+            return { success: true, message: "Nenhuma atualização de estoque necessária" };
+        }
+
+        console.log(`📊 ${updates.length} atualizações de estoque a serem processadas:`, updates);
+
+        // Atualizar produtos no banco de dados em lote
+        const productsToUpdate = Array.from(productsMap.values()).filter(product => 
+            updates.some(update => update.productId === product.id)
+        );
+
+        console.log(`💾 Atualizando ${productsToUpdate.length} produtos no banco...`);
+
+        const { error: updateError } = await supabase
+            .from('products')
+            .upsert(productsToUpdate);
+
+        if (updateError) {
+            console.error('❌ Erro ao atualizar produtos:', updateError);
+            throw new Error(`Erro ao atualizar produtos: ${updateError.message}`);
+        }
+
+        // Registrar histórico de atualizações de estoque
+        if (stockUpdates.length > 0) {
+            try {
+                const { error: historyError } = await supabase
+                    .from('stock_updates_history')
+                    .insert(stockUpdates.map(update => ({
+                        ...update,
+                        updated_at: new Date().toISOString()
+                    })));
+
+                if (historyError) {
+                    console.error('⚠️ Erro ao salvar histórico, mas estoque foi atualizado:', historyError);
+                }
+            } catch (historyError) {
+                console.error('⚠️ Erro no histórico (não crítico):', historyError);
+            }
+        }
+
+        console.log('✅ Estoque atualizado com sucesso!');
+        console.log(`📋 Resumo: ${updates.length} itens atualizados em ${productsToUpdate.length} produtos`);
+
+        return { 
+            success: true, 
+            message: `Estoque atualizado para ${updates.length} itens`,
+            updates: updates.length,
+            products: productsToUpdate.length
+        };
+
+    } catch (error) {
+        console.error('❌ Erro na atualização de estoque:', error);
+        throw error;
+    }
+}
+
 // ENDPOINTS DA API
 
 // Autenticação - CORRIGIDA
@@ -361,77 +490,52 @@ app.post("/api/products", async (req, res) => {
     }
 });
 
-// NOVO ENDPOINT: Atualizar estoque após pedido - CORRIGIDO PARA SER MAIS RÁPIDO
+// ENDPOINT OTIMIZADO: Atualizar estoque após pedido - CORRIGIDO E MELHORADO
 app.post("/api/orders/update-stock", async (req, res) => {
     try {
         const { items } = req.body;
         
-        console.log('🔄 Atualizando estoque após pedido:', items?.length || 0, 'itens');
+        console.log('🔄 Recebida solicitação para atualizar estoque:', items?.length || 0, 'itens');
         
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: "Nenhum item para atualizar estoque" });
         }
 
-        // Buscar produtos atuais
-        const { data: currentProducts, error: fetchError } = await supabase
-            .from('products')
-            .select('*');
+        // Validar itens antes de processar
+        const validItems = items.filter(item => 
+            item && 
+            typeof item.id === 'number' && 
+            typeof item.saborIndex === 'number' && 
+            typeof item.quantity === 'number' &&
+            item.quantity > 0
+        );
 
-        if (fetchError) {
-            console.error('❌ Erro ao buscar produtos:', fetchError);
-            // Não lançar erro, apenas retornar sucesso para não bloquear o WhatsApp
-            return res.json({ success: true, message: "Estoque será atualizado em background" });
+        if (validItems.length === 0) {
+            return res.status(400).json({ error: "Nenhum item válido para atualizar estoque" });
         }
 
-        // Atualizar estoque para cada item do pedido
-        const updatedProducts = [...currentProducts];
-        let hasUpdates = false;
-        
-        items.forEach(orderItem => {
-            const productIndex = updatedProducts.findIndex(p => p.id === orderItem.id);
-            
-            if (productIndex !== -1) {
-                const product = updatedProducts[productIndex];
-                
-                if (product.sabores && product.sabores[orderItem.saborIndex]) {
-                    const sabor = product.sabores[orderItem.saborIndex];
-                    
-                    // Subtrair a quantidade comprada do estoque
-                    const newQuantity = Math.max(0, (sabor.quantity || 0) - orderItem.quantity);
-                    product.sabores[orderItem.saborIndex].quantity = newQuantity;
-                    hasUpdates = true;
-                    
-                    console.log(`📦 Atualizando estoque: ${product.title} - ${sabor.name}: ${sabor.quantity} → ${newQuantity}`);
-                }
-            }
-        });
+        console.log(`📦 Processando ${validItems.length} itens válidos de ${items.length} totais`);
 
-        // Salvar produtos atualizados apenas se houver mudanças
-        if (hasUpdates) {
-            const { error: updateError } = await supabase
-                .from('products')
-                .upsert(updatedProducts);
-
-            if (updateError) {
-                console.error('❌ Erro ao atualizar produtos:', updateError);
-                // Não lançar erro, apenas log
-            } else {
-                console.log('✅ Estoque atualizado com sucesso!');
-            }
-        }
+        // Usar a nova função otimizada
+        const result = await updateStockForOrder(validItems);
 
         // Limpar cache para forçar recarregamento
         clearCache();
 
-        // Sempre retornar sucesso para não bloquear o redirecionamento para WhatsApp
-        res.json({ 
-            success: true, 
-            message: `Estoque atualizado para ${items.length} itens`
-        });
+        console.log('✅ Atualização de estoque concluída com sucesso');
+        res.json(result);
+        
     } catch (error) {
         console.error("❌ Erro ao atualizar estoque:", error);
+        
         // Mesmo com erro, retornar sucesso para não bloquear WhatsApp
-        res.json({ success: true, message: "Estoque será atualizado em background" });
+        // Mas com flag indicando que houve problema
+        res.json({ 
+            success: true, 
+            message: "Pedido processado, mas estoque pode precisar de verificação manual",
+            error: error.message,
+            needs_manual_check: true
+        });
     }
 });
 
@@ -631,7 +735,7 @@ app.get("/", (req, res) => {
         cache: "Ativo apenas para produtos",
         performance: "Turbo",
         categorias: "SEM CACHE - Sempre atualizadas",
-        estoque: "Atualização em tempo real ativada"
+        estoque: "Sistema otimizado para múltiplos itens ATIVADO"
     });
 });
 
@@ -689,13 +793,44 @@ app.get("/api/debug/encrypt/:text", (req, res) => {
     });
 });
 
+// NOVO ENDPOINT: Forçar atualização de cache
+app.post("/api/cache/refresh", async (req, res) => {
+    try {
+        clearCache();
+        
+        // Recarregar produtos para repopular cache
+        const { data: products, error } = await supabase
+            .from('products')
+            .select('*')
+            .order('display_order', { ascending: true, nullsFirst: false })
+            .order('id');
+
+        if (error) {
+            throw error;
+        }
+
+        cache.products = normalizeProducts(products || []);
+        cache.productsTimestamp = Date.now();
+
+        res.json({ 
+            success: true, 
+            message: "Cache recarregado com sucesso",
+            products_count: cache.products.length 
+        });
+    } catch (error) {
+        console.error("❌ Erro ao recarregar cache:", error);
+        res.status(500).json({ error: "Erro ao recarregar cache: " + error.message });
+    }
+});
+
 // Inicializar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-    console.log(`🚀 Servidor SABORES rodando em http://localhost:${PORT}`);
+    console.log(`🚀 Servidor SABORES OTIMIZADO rodando em http://localhost:${PORT}`);
     console.log(`💾 Cache ativo APENAS para produtos: ${CACHE_DURATION/1000}s`);
     console.log(`✅ Categorias SEM CACHE - sempre atualizadas`);
-    console.log(`🔄 Sistema de estoque em tempo real ATIVADO`);
+    console.log(`🔄 Sistema de estoque OTIMIZADO para múltiplos itens ATIVADO`);
+    console.log(`📊 Nova função de atualização em lote implementada`);
     
     // Garantir que as credenciais existem
     await ensureAdminCredentials();

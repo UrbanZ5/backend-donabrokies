@@ -64,7 +64,7 @@ function normalizeCategories(categories) {
     }).filter(cat => cat !== null);
 }
 
-// Normalizar produtos
+// Normalizar produtos - CORREÇÃO: Garantir que estoque zero mostre "Esgotado"
 function normalizeProducts(products) {
     if (!Array.isArray(products)) return [];
     
@@ -173,7 +173,7 @@ async function ensureAdminCredentials() {
     }
 }
 
-// NOVA FUNÇÃO: Atualização de estoque otimizada para múltiplos itens
+// NOVA FUNÇÃO: Atualização de estoque OTIMIZADA e CONFIÁVEL
 async function updateStockForOrder(items) {
     try {
         console.log('🔄 Iniciando atualização de estoque para pedido com', items.length, 'itens');

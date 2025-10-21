@@ -64,7 +64,7 @@ function normalizeCategories(categories) {
     }).filter(cat => cat !== null);
 }
 
-// Normalizar produtos - CORREÇÃO: Garantir que estoque zero mostre "Esgotado"
+// Normalizar produtos - CORREÇÃO: Garantir que estoque zero mostre "Esgotado" E ordenar sabores disponíveis primeiro
 function normalizeProducts(products) {
     if (!Array.isArray(products)) return [];
     
@@ -82,11 +82,24 @@ function normalizeProducts(products) {
             };
         }
         
-        // Se já tem sabores, garantir que está no formato correto
+        // Se já tem sabores, garantir que está no formato correto E ORDENAR SABORES DISPONÍVEIS PRIMEIRO
         if (product.sabores && Array.isArray(product.sabores)) {
+            // CORREÇÃO: Ordenar sabores - disponíveis primeiro, esgotados depois
+            const sortedSabores = [...product.sabores].sort((a, b) => {
+                const aStock = a.quantity || 0;
+                const bStock = b.quantity || 0;
+                
+                // Sabores com estoque > 0 vêm primeiro
+                if (aStock > 0 && bStock === 0) return -1;
+                if (aStock === 0 && bStock > 0) return 1;
+                
+                // Se ambos têm estoque ou ambos estão esgotados, mantém a ordem original
+                return 0;
+            });
+            
             return {
                 ...product,
-                sabores: product.sabores.map(sabor => ({
+                sabores: sortedSabores.map(sabor => ({
                     name: sabor.name || 'Sem nome',
                     image: sabor.image || 'https://via.placeholder.com/400x300',
                     quantity: sabor.quantity || 0,

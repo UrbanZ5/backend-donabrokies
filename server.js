@@ -19,10 +19,10 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Configuração Efi (GerenciaNet)
+// Configuração Efi (GerenciaNet) - CORREÇÃO: URL DE HOMOLOGAÇÃO
 const EFI_CLIENT_ID = process.env.EFI_CLIENT_ID || 'Client_Id_7e06612abc54288e1bba37128b2716676fd639e9';
 const EFI_CLIENT_SECRET = process.env.EFI_CLIENT_SECRET || 'Client_Secret_e9cff9d6d9049c89a923fb86192c2ff0194adb08';
-const EFI_BASE_URL = 'https://api-pix.gerencianet.com.br';
+const EFI_BASE_URL = 'https://api-pix-h.gerencianet.com.br'; // URL DE HOMOLOGAÇÃO
 
 // Middleware
 app.use(cors());
@@ -55,7 +55,8 @@ async function getEfiAccessToken() {
                 headers: {
                     'Authorization': `Basic ${credentials}`,
                     'Content-Type': 'application/x-www-form-urlencoded'
-                }
+                },
+                timeout: 30000 // Aumentar timeout para 30 segundos
             }
         );
 
@@ -102,7 +103,8 @@ async function createPixCharge(amount, customerInfo) {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
                 'Content-Type': 'application/json'
-            }
+            },
+            timeout: 30000 // Aumentar timeout para 30 segundos
         });
 
         console.log('✅ Cobrança PIX criada:', response.data.txid);
@@ -122,7 +124,8 @@ async function generateQRCode(locationId) {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
                 'Content-Type': 'application/json'
-            }
+            },
+            timeout: 30000 // Aumentar timeout para 30 segundos
         });
 
         return response.data;
@@ -141,7 +144,8 @@ async function checkPaymentStatus(txid) {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
                 'Content-Type': 'application/json'
-            }
+            },
+            timeout: 30000 // Aumentar timeout para 30 segundos
         });
 
         return response.data;
@@ -1142,8 +1146,9 @@ app.post("/api/cache/refresh", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
     console.log(`🚀 Servidor DONA BROOKIES com PIX rodando em http://localhost:${PORT}`);
-    console.log(`💰 Sistema PIX dinâmico ATIVO`);
+    console.log(`💰 Sistema PIX dinâmico ATIVO - AMBIENTE DE HOMOLOGAÇÃO`);
     console.log(`🔔 Webhook configurado para notificações automáticas`);
+    console.log(`🌐 URL da API PIX: ${EFI_BASE_URL}`);
     
     // Garantir que as credenciais existem
     await ensureAdminCredentials();

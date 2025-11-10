@@ -39,6 +39,12 @@ let cache = {
 
 const CACHE_DURATION = 2 * 60 * 1000;
 
+// Configuração global do axios para timeouts mais longos
+const axiosInstance = axios.create({
+    timeout: 45000, // 45 segundos
+    timeoutErrorMessage: 'Timeout - A requisição demorou muito para responder'
+});
+
 // Função para obter access token da Efi
 async function getEfiAccessToken() {
     try {
@@ -49,14 +55,16 @@ async function getEfiAccessToken() {
 
         const credentials = Buffer.from(`${EFI_CLIENT_ID}:${EFI_CLIENT_SECRET}`).toString('base64');
         
-        const response = await axios.post(`${EFI_BASE_URL}/oauth/token`, 
+        console.log('🔐 Obtendo token de acesso da Efi...');
+        
+        const response = await axiosInstance.post(`${EFI_BASE_URL}/oauth/token`, 
             'grant_type=client_credentials',
             {
                 headers: {
                     'Authorization': `Basic ${credentials}`,
                     'Content-Type': 'application/x-www-form-urlencoded'
                 },
-                timeout: 30000 // Aumentar timeout para 30 segundos
+                timeout: 30000
             }
         );
 
@@ -67,6 +75,9 @@ async function getEfiAccessToken() {
         return cache.accessToken;
     } catch (error) {
         console.error('❌ Erro ao obter token Efi:', error.response?.data || error.message);
+        if (error.code === 'ECONNRESET') {
+            console.error('💥 Conexão resetada pelo servidor da Efi');
+        }
         throw error;
     }
 }
@@ -99,19 +110,31 @@ async function createPixCharge(amount, customerInfo) {
             ]
         };
 
-        const response = await axios.post(`${EFI_BASE_URL}/v2/cob`, payload, {
+        console.log('💰 Criando cobrança PIX...', { valor, customer: customerInfo.name });
+
+        const response = await axiosInstance.post(`${EFI_BASE_URL}/v2/cob`, payload, {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
                 'Content-Type': 'application/json'
             },
-            timeout: 30000 // Aumentar timeout para 30 segundos
+            timeout: 30000
         });
 
         console.log('✅ Cobrança PIX criada:', response.data.txid);
         return response.data;
     } catch (error) {
-        console.error('❌ Erro ao criar cobrança PIX:', error.response?.data || error.message);
-        throw error;
+        console.error('❌ Erro ao criar cobrança PIX:');
+        console.error('Código do erro:', error.code);
+        console.error('Mensagem:', error.message);
+        console.error('Response data:', error.response?.data);
+        
+        if (error.code === 'ECONNRESET') {
+            throw new Error('Conexão com a API PIX foi interrompida. Tente novamente.');
+        } else if (error.response?.data) {
+            throw new Error(error.response.data.mensagem || 'Erro ao criar cobrança PIX');
+        } else {
+            throw new Error('Erro de conexão com o serviço PIX. Verifique sua internet.');
+        }
     }
 }
 
@@ -120,17 +143,23 @@ async function generateQRCode(locationId) {
     try {
         const accessToken = await getEfiAccessToken();
         
-        const response = await axios.get(`${EFI_BASE_URL}/v2/loc/${locationId}/qrcode`, {
+        console.log('📱 Gerando QR Code para location:', locationId);
+        
+        const response = await axiosInstance.get(`${EFI_BASE_URL}/v2/loc/${locationId}/qrcode`, {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
                 'Content-Type': 'application/json'
             },
-            timeout: 30000 // Aumentar timeout para 30 segundos
+            timeout: 30000
         });
 
+        console.log('✅ QR Code gerado com sucesso');
         return response.data;
     } catch (error) {
         console.error('❌ Erro ao gerar QR Code:', error.response?.data || error.message);
+        if (error.code === 'ECONNRESET') {
+            throw new Error('Conexão interrompida ao gerar QR Code');
+        }
         throw error;
     }
 }
@@ -140,12 +169,12 @@ async function checkPaymentStatus(txid) {
     try {
         const accessToken = await getEfiAccessToken();
         
-        const response = await axios.get(`${EFI_BASE_URL}/v2/cob/${txid}`, {
+        const response = await axiosInstance.get(`${EFI_BASE_URL}/v2/cob/${txid}`, {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
                 'Content-Type': 'application/json'
             },
-            timeout: 30000 // Aumentar timeout para 30 segundos
+            timeout: 30000
         });
 
         return response.data;
@@ -676,12 +705,14 @@ app.post("/api/orders/update-stock", async (req, res) => {
     }
 });
 
-// NOVO ENDPOINT: Criar pedido com PIX
+// NOVO ENDPOINT: Criar pedido com PIX - COM MELHOR TRATAMENTO DE ERRO
 app.post("/api/orders/create-pix", async (req, res) => {
     try {
         const { items, customer, total } = req.body;
         
-        console.log('💰 Criando pedido com PIX:', total);
+        console.log('💰 Criando pedido com PIX - Total:', total);
+        console.log('📦 Itens:', items?.length || 0);
+        console.log('👤 Cliente:', customer?.name);
         
         if (!items || !Array.isArray(items) || items.length === 0) {
             return res.status(400).json({ error: "Carrinho vazio" });
@@ -691,12 +722,21 @@ app.post("/api/orders/create-pix", async (req, res) => {
             return res.status(400).json({ error: "Dados do cliente incompletos" });
         }
 
+        // Validar valor total
+        if (!total || total <= 0) {
+            return res.status(400).json({ error: "Valor total inválido" });
+        }
+
+        console.log('🔐 Obtendo token e criando cobrança PIX...');
+        
         // Criar cobrança PIX
         const charge = await createPixCharge(total, customer);
         
+        console.log('📱 Gerando QR Code...');
         // Gerar QR Code
         const qrCode = await generateQRCode(charge.loc.id);
         
+        console.log('💾 Salvando pedido no banco...');
         // Salvar pedido no banco
         const orderData = {
             items,
@@ -720,7 +760,7 @@ app.post("/api/orders/create-pix", async (req, res) => {
 
         if (error) {
             console.error('❌ Erro ao salvar pedido:', error);
-            throw error;
+            throw new Error(`Erro ao salvar pedido: ${error.message}`);
         }
 
         console.log('✅ Pedido criado com sucesso:', order.id);
@@ -740,8 +780,22 @@ app.post("/api/orders/create-pix", async (req, res) => {
 
     } catch (error) {
         console.error("❌ Erro ao criar pedido PIX:", error);
+        
+        // Mensagem de erro mais amigável
+        let errorMessage = "Erro ao processar pagamento PIX";
+        
+        if (error.message.includes('Conexão')) {
+            errorMessage = "Problema de conexão com o serviço PIX. Tente novamente.";
+        } else if (error.message.includes('Timeout')) {
+            errorMessage = "Tempo limite excedido. Tente novamente.";
+        } else if (error.response?.data?.mensagem) {
+            errorMessage = error.response.data.mensagem;
+        } else {
+            errorMessage = error.message;
+        }
+        
         res.status(500).json({ 
-            error: "Erro ao criar pedido: " + (error.response?.data?.mensagem || error.message) 
+            error: errorMessage
         });
     }
 });
@@ -1142,6 +1196,34 @@ app.post("/api/cache/refresh", async (req, res) => {
     }
 });
 
+// NOVO ENDPOINT: Testar conexão com a API PIX
+app.get("/api/pix/test-connection", async (req, res) => {
+    try {
+        console.log('🧪 Testando conexão com API PIX...');
+        
+        const token = await getEfiAccessToken();
+        
+        if (token) {
+            res.json({ 
+                success: true, 
+                message: "Conexão com API PIX estabelecida com sucesso",
+                environment: "Homologação",
+                base_url: EFI_BASE_URL
+            });
+        } else {
+            throw new Error("Não foi possível obter token de acesso");
+        }
+    } catch (error) {
+        console.error('❌ Erro no teste de conexão:', error.message);
+        res.status(500).json({ 
+            success: false,
+            error: "Falha na conexão com API PIX: " + error.message,
+            environment: "Homologação",
+            base_url: EFI_BASE_URL
+        });
+    }
+});
+
 // Inicializar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
@@ -1149,9 +1231,21 @@ app.listen(PORT, async () => {
     console.log(`💰 Sistema PIX dinâmico ATIVO - AMBIENTE DE HOMOLOGAÇÃO`);
     console.log(`🔔 Webhook configurado para notificações automáticas`);
     console.log(`🌐 URL da API PIX: ${EFI_BASE_URL}`);
+    console.log(`⏰ Timeouts configurados: 45 segundos`);
     
     // Garantir que as credenciais existem
     await ensureAdminCredentials();
+    
+    // Testar conexão com PIX ao iniciar
+    console.log('🧪 Testando conexão com API PIX...');
+    try {
+        const token = await getEfiAccessToken();
+        if (token) {
+            console.log('✅ Conexão com API PIX: OK');
+        }
+    } catch (error) {
+        console.log('❌ Conexão com API PIX: FALHA -', error.message);
+    }
 });
 
 export default app;

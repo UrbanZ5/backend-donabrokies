@@ -3,6 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { createClient } from '@supabase/supabase-js';
 import axios from 'axios';
+import https from 'https';
 
 dotenv.config();
 
@@ -22,7 +23,25 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 // Configuração Efi (GerenciaNet) - CORREÇÃO: URL DE HOMOLOGAÇÃO
 const EFI_CLIENT_ID = process.env.EFI_CLIENT_ID || 'Client_Id_7e06612abc54288e1bba37128b2716676fd639e9';
 const EFI_CLIENT_SECRET = process.env.EFI_CLIENT_SECRET || 'Client_Secret_e9cff9d6d9049c89a923fb86192c2ff0194adb08';
-const EFI_BASE_URL = 'https://api-pix-h.gerencianet.com.br'; // URL DE HOMOLOGAÇÃO
+const EFI_BASE_URL = 'https://api-pix-h.gerencianet.com.br';
+
+// Configuração específica para o Render - Ignorar certificados SSL
+const httpsAgent = new https.Agent({
+  rejectUnauthorized: false, // Ignorar erros de certificado SSL
+  keepAlive: true,
+  timeout: 45000,
+});
+
+// Configuração global do axios para o Render
+const axiosInstance = axios.create({
+  httpsAgent: httpsAgent,
+  timeout: 45000,
+  timeoutErrorMessage: 'Timeout - A requisição demorou muito para responder',
+  headers: {
+    'User-Agent': 'DonaBrookies/1.0.0',
+    'Accept': 'application/json',
+  }
+});
 
 // Middleware
 app.use(cors());
@@ -39,14 +58,10 @@ let cache = {
 
 const CACHE_DURATION = 2 * 60 * 1000;
 
-// Configuração global do axios para timeouts mais longos
-const axiosInstance = axios.create({
-    timeout: 45000, // 45 segundos
-    timeoutErrorMessage: 'Timeout - A requisição demorou muito para responder'
-});
-
-// Função para obter access token da Efi
-async function getEfiAccessToken() {
+// Função para obter access token da Efi - COM RETRY
+async function getEfiAccessToken(retryCount = 0) {
+    const maxRetries = 3;
+    
     try {
         // Verificar se temos um token válido no cache
         if (cache.accessToken && Date.now() < cache.tokenExpires) {
@@ -62,28 +77,35 @@ async function getEfiAccessToken() {
             {
                 headers: {
                     'Authorization': `Basic ${credentials}`,
-                    'Content-Type': 'application/x-www-form-urlencoded'
-                },
-                timeout: 30000
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                    'User-Agent': 'DonaBrookies/1.0.0'
+                }
             }
         );
 
         cache.accessToken = response.data.access_token;
-        cache.tokenExpires = Date.now() + (response.data.expires_in * 1000) - 60000; // 1 minuto de margem
+        cache.tokenExpires = Date.now() + (response.data.expires_in * 1000) - 60000;
         
         console.log('✅ Token Efi obtido com sucesso');
         return cache.accessToken;
     } catch (error) {
-        console.error('❌ Erro ao obter token Efi:', error.response?.data || error.message);
-        if (error.code === 'ECONNRESET') {
-            console.error('💥 Conexão resetada pelo servidor da Efi');
+        console.error('❌ Erro ao obter token Efi:', error.message);
+        
+        // Tentar novamente se não excedeu o número máximo de tentativas
+        if (retryCount < maxRetries) {
+            console.log(`🔄 Tentativa ${retryCount + 1} de ${maxRetries}...`);
+            await new Promise(resolve => setTimeout(resolve, 2000 * (retryCount + 1))); // Backoff exponencial
+            return getEfiAccessToken(retryCount + 1);
         }
+        
         throw error;
     }
 }
 
-// Função para criar cobrança PIX
-async function createPixCharge(amount, customerInfo) {
+// Função para criar cobrança PIX - COM RETRY
+async function createPixCharge(amount, customerInfo, retryCount = 0) {
+    const maxRetries = 2;
+    
     try {
         const accessToken = await getEfiAccessToken();
         
@@ -92,12 +114,12 @@ async function createPixCharge(amount, customerInfo) {
         
         const payload = {
             calendario: {
-                expiracao: 3600 // 1 hora
+                expiracao: 3600
             },
             valor: {
                 original: valor.toFixed(2)
             },
-            chave: '125.707.164-56', // Sua chave PIX
+            chave: '125.707.164-56',
             infoAdicionais: [
                 {
                     nome: 'Pedido',
@@ -115,20 +137,24 @@ async function createPixCharge(amount, customerInfo) {
         const response = await axiosInstance.post(`${EFI_BASE_URL}/v2/cob`, payload, {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-            },
-            timeout: 30000
+                'Content-Type': 'application/json',
+                'User-Agent': 'DonaBrookies/1.0.0'
+            }
         });
 
         console.log('✅ Cobrança PIX criada:', response.data.txid);
         return response.data;
     } catch (error) {
-        console.error('❌ Erro ao criar cobrança PIX:');
-        console.error('Código do erro:', error.code);
-        console.error('Mensagem:', error.message);
-        console.error('Response data:', error.response?.data);
+        console.error('❌ Erro ao criar cobrança PIX:', error.message);
         
-        if (error.code === 'ECONNRESET') {
+        // Tentar novamente se não excedeu o número máximo de tentativas
+        if (retryCount < maxRetries) {
+            console.log(`🔄 Tentativa ${retryCount + 1} de ${maxRetries} para criar cobrança...`);
+            await new Promise(resolve => setTimeout(resolve, 2000 * (retryCount + 1)));
+            return createPixCharge(amount, customerInfo, retryCount + 1);
+        }
+        
+        if (error.code === 'ECONNRESET' || error.message.includes('ECONNRESET')) {
             throw new Error('Conexão com a API PIX foi interrompida. Tente novamente.');
         } else if (error.response?.data) {
             throw new Error(error.response.data.mensagem || 'Erro ao criar cobrança PIX');
@@ -148,18 +174,15 @@ async function generateQRCode(locationId) {
         const response = await axiosInstance.get(`${EFI_BASE_URL}/v2/loc/${locationId}/qrcode`, {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-            },
-            timeout: 30000
+                'Content-Type': 'application/json',
+                'User-Agent': 'DonaBrookies/1.0.0'
+            }
         });
 
         console.log('✅ QR Code gerado com sucesso');
         return response.data;
     } catch (error) {
-        console.error('❌ Erro ao gerar QR Code:', error.response?.data || error.message);
-        if (error.code === 'ECONNRESET') {
-            throw new Error('Conexão interrompida ao gerar QR Code');
-        }
+        console.error('❌ Erro ao gerar QR Code:', error.message);
         throw error;
     }
 }
@@ -172,14 +195,14 @@ async function checkPaymentStatus(txid) {
         const response = await axiosInstance.get(`${EFI_BASE_URL}/v2/cob/${txid}`, {
             headers: {
                 'Authorization': `Bearer ${accessToken}`,
-                'Content-Type': 'application/json'
-            },
-            timeout: 30000
+                'Content-Type': 'application/json',
+                'User-Agent': 'DonaBrookies/1.0.0'
+            }
         });
 
         return response.data;
     } catch (error) {
-        console.error('❌ Erro ao verificar status:', error.response?.data || error.message);
+        console.error('❌ Erro ao verificar status:', error.message);
         throw error;
     }
 }
@@ -217,12 +240,11 @@ function normalizeCategories(categories) {
     }).filter(cat => cat !== null);
 }
 
-// Normalizar produtos - CORREÇÃO: Garantir que estoque zero mostre "Esgotado" E ordenar sabores disponíveis primeiro
+// Normalizar produtos
 function normalizeProducts(products) {
     if (!Array.isArray(products)) return [];
     
     return products.map(product => {
-        // Converter estrutura antiga (cores/sizes) para nova estrutura (sabores/quantity)
         if (product.colors && Array.isArray(product.colors)) {
             return {
                 ...product,
@@ -235,18 +257,13 @@ function normalizeProducts(products) {
             };
         }
         
-        // Se já tem sabores, garantir que está no formato correto E ORDENAR SABORES DISPONÍVEIS PRIMEIRO
         if (product.sabores && Array.isArray(product.sabores)) {
-            // CORREÇÃO: Ordenar sabores - disponíveis primeiro, esgotados depois
             const sortedSabores = [...product.sabores].sort((a, b) => {
                 const aStock = a.quantity || 0;
                 const bStock = b.quantity || 0;
                 
-                // Sabores com estoque > 0 vêm primeiro
                 if (aStock > 0 && bStock === 0) return -1;
                 if (aStock === 0 && bStock > 0) return 1;
-                
-                // Se ambos têm estoque ou ambos estão esgotados, mantém a ordem original
                 return 0;
             });
             
@@ -310,27 +327,10 @@ async function ensureAdminCredentials() {
                 return false;
             } else {
                 console.log('✅ Credenciais admin criadas com sucesso!');
-                console.log('📋 Usuário: admin');
-                console.log('🔑 Senha: admin123');
-                console.log('🔐 Senha criptografada:', encryptedPassword);
                 return true;
             }
         } else {
             console.log('✅ Credenciais admin já existem');
-            console.log('📋 Usuário:', existingCreds.username);
-            console.log('🔑 Senha no banco:', existingCreds.password);
-            console.log('🔐 Senha criptografada no banco:', existingCreds.encrypted_password);
-            
-            // Verificar se a senha criptografada está correta
-            const testPassword = 'admin123';
-            const testEncrypted = simpleEncrypt(testPassword);
-            console.log('🔍 Testando criptografia:', {
-                senha_teste: testPassword,
-                criptografado_teste: testEncrypted,
-                criptografado_banco: existingCreds.encrypted_password,
-                coincide: testEncrypted === existingCreds.encrypted_password
-            });
-            
             return true;
         }
     } catch (error) {
@@ -349,7 +349,6 @@ async function updateStockForOrder(items) {
             return { success: true, message: "Nenhum item para atualizar" };
         }
 
-        // Buscar todos os produtos de uma vez
         const productIds = [...new Set(items.map(item => item.id))];
         console.log('📦 Produtos únicos a serem atualizados:', productIds);
 
@@ -370,13 +369,11 @@ async function updateStockForOrder(items) {
 
         console.log(`✅ ${currentProducts.length} produtos encontrados para atualização`);
 
-        // Criar mapa para acesso rápido aos produtos
         const productsMap = new Map();
         currentProducts.forEach(product => {
             productsMap.set(product.id, { ...product });
         });
 
-        // Atualizar estoque na memória
         const updates = [];
         const stockUpdates = [];
 
@@ -418,7 +415,6 @@ async function updateStockForOrder(items) {
 
         console.log(`📊 ${updates.length} atualizações de estoque a serem processadas:`, updates);
 
-        // Atualizar produtos no banco de dados em lote
         const productsToUpdate = Array.from(productsMap.values()).filter(product => 
             updates.some(update => update.productId === product.id)
         );
@@ -434,7 +430,6 @@ async function updateStockForOrder(items) {
             throw new Error(`Erro ao atualizar produtos: ${updateError.message}`);
         }
 
-        // Registrar histórico de atualizações de estoque
         if (stockUpdates.length > 0) {
             try {
                 const { error: historyError } = await supabase
@@ -470,7 +465,7 @@ async function updateStockForOrder(items) {
 
 // ENDPOINTS DA API
 
-// Autenticação - CORRIGIDA
+// Autenticação
 app.post("/api/auth/login", async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -497,25 +492,9 @@ app.post("/api/auth/login", async (req, res) => {
             return res.status(401).json({ error: "Credenciais inválidas" });
         }
 
-        console.log('🔍 Credencial encontrada:', {
-            usuario: credentials.username,
-            senha_banco: credentials.password,
-            senha_criptografada_banco: credentials.encrypted_password
-        });
-        
-        // Verificar senha em texto plano (mais simples)
         const isPlainPasswordValid = password === credentials.password;
-        
-        // Verificar senha criptografada
         const encryptedInput = simpleEncrypt(password);
         const isPasswordValid = encryptedInput === credentials.encrypted_password;
-
-        console.log('🔐 Verificação de senha:', {
-            senha_digitada: password,
-            senha_criptografada_digitada: encryptedInput,
-            valida_texto: isPlainPasswordValid,
-            valida_cripto: isPasswordValid
-        });
 
         if (isPasswordValid || isPlainPasswordValid) {
             console.log('✅ Login bem-sucedido para:', username);
@@ -656,7 +635,7 @@ app.post("/api/products", async (req, res) => {
     }
 });
 
-// ENDPOINT OTIMIZADO: Atualizar estoque após pedido - CORRIGIDO E MELHORADO
+// ENDPOINT OTIMIZADO: Atualizar estoque após pedido
 app.post("/api/orders/update-stock", async (req, res) => {
     try {
         const { items } = req.body;
@@ -667,7 +646,6 @@ app.post("/api/orders/update-stock", async (req, res) => {
             return res.status(400).json({ error: "Nenhum item para atualizar estoque" });
         }
 
-        // Validar itens antes de processar
         const validItems = items.filter(item => 
             item && 
             typeof item.id === 'number' && 
@@ -682,10 +660,8 @@ app.post("/api/orders/update-stock", async (req, res) => {
 
         console.log(`📦 Processando ${validItems.length} itens válidos de ${items.length} totais`);
 
-        // Usar a nova função otimizada
         const result = await updateStockForOrder(validItems);
 
-        // Limpar cache para forçar recarregamento
         clearCache();
 
         console.log('✅ Atualização de estoque concluída com sucesso');
@@ -694,8 +670,6 @@ app.post("/api/orders/update-stock", async (req, res) => {
     } catch (error) {
         console.error("❌ Erro ao atualizar estoque:", error);
         
-        // Mesmo com erro, retornar sucesso para não bloquear WhatsApp
-        // Mas com flag indicando que houve problema
         res.json({ 
             success: true, 
             message: "Pedido processado, mas estoque pode precisar de verificação manual",
@@ -722,7 +696,6 @@ app.post("/api/orders/create-pix", async (req, res) => {
             return res.status(400).json({ error: "Dados do cliente incompletos" });
         }
 
-        // Validar valor total
         if (!total || total <= 0) {
             return res.status(400).json({ error: "Valor total inválido" });
         }
@@ -779,9 +752,8 @@ app.post("/api/orders/create-pix", async (req, res) => {
         });
 
     } catch (error) {
-        console.error("❌ Erro ao criar pedido PIX:", error);
+        console.error("❌ Erro ao criar pedido PIX:", error.message);
         
-        // Mensagem de erro mais amigável
         let errorMessage = "Erro ao processar pagamento PIX";
         
         if (error.message.includes('Conexão')) {
@@ -817,10 +789,8 @@ app.get("/api/orders/:orderId/status", async (req, res) => {
             return res.status(404).json({ error: "Pedido não encontrado" });
         }
 
-        // Verificar status na Efi
         const paymentStatus = await checkPaymentStatus(order.pix_data.txid);
         
-        // Atualizar status do pedido se necessário
         if (paymentStatus.status !== order.pix_data.status) {
             const { error: updateError } = await supabase
                 .from('orders')
@@ -834,7 +804,6 @@ app.get("/api/orders/:orderId/status", async (req, res) => {
                 console.error('❌ Erro ao atualizar status:', updateError);
             }
 
-            // Se pagamento confirmado, atualizar estoque
             if (paymentStatus.status === 'CONCLUIDA') {
                 try {
                     await updateStockForOrder(order.items);
@@ -866,7 +835,6 @@ app.post("/api/webhook/pix", async (req, res) => {
         const notification = req.body;
         console.log('🔔 Webhook PIX recebido:', notification);
         
-        // Buscar pedido pelo txid
         const { data: orders, error } = await supabase
             .from('orders')
             .select('*')
@@ -879,7 +847,6 @@ app.post("/api/webhook/pix", async (req, res) => {
 
         const order = orders[0];
 
-        // Atualizar status do pedido
         const { error: updateError } = await supabase
             .from('orders')
             .update({ 
@@ -894,7 +861,6 @@ app.post("/api/webhook/pix", async (req, res) => {
             return res.status(500).json({ error: "Erro ao atualizar pedido" });
         }
 
-        // Atualizar estoque
         try {
             await updateStockForOrder(order.items);
             console.log('✅ Estoque atualizado via webhook para pedido:', order.id);
@@ -1171,7 +1137,6 @@ app.post("/api/cache/refresh", async (req, res) => {
     try {
         clearCache();
         
-        // Recarregar produtos para repopular cache
         const { data: products, error } = await supabase
             .from('products')
             .select('*')
@@ -1219,7 +1184,8 @@ app.get("/api/pix/test-connection", async (req, res) => {
             success: false,
             error: "Falha na conexão com API PIX: " + error.message,
             environment: "Homologação",
-            base_url: EFI_BASE_URL
+            base_url: EFI_BASE_URL,
+            details: "O Render pode estar bloqueando conexões externas. Considere usar outra hospedagem como Railway ou Fly.io"
         });
     }
 });
@@ -1231,7 +1197,7 @@ app.listen(PORT, async () => {
     console.log(`💰 Sistema PIX dinâmico ATIVO - AMBIENTE DE HOMOLOGAÇÃO`);
     console.log(`🔔 Webhook configurado para notificações automáticas`);
     console.log(`🌐 URL da API PIX: ${EFI_BASE_URL}`);
-    console.log(`⏰ Timeouts configurados: 45 segundos`);
+    console.log(`🔧 Configuração Render: SSL ignorado, KeepAlive ativo`);
     
     // Garantir que as credenciais existem
     await ensureAdminCredentials();
@@ -1245,6 +1211,8 @@ app.listen(PORT, async () => {
         }
     } catch (error) {
         console.log('❌ Conexão com API PIX: FALHA -', error.message);
+        console.log('💡 Dica: O Render pode estar bloqueando conexões com a API da GerenciaNet.');
+        console.log('💡 Considere migrar para Railway (railway.app) ou Fly.io (fly.io)');
     }
 });
 

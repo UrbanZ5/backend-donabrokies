@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { createClient } from '@supabase/supabase-js';
+import axios from 'axios';
 
 dotenv.config();
 
@@ -18,6 +19,11 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+// Configuração Efi (GerenciaNet)
+const EFI_CLIENT_ID = process.env.EFI_CLIENT_ID || 'Client_Id_7e06612abc54288e1bba37128b2716676fd639e9';
+const EFI_CLIENT_SECRET = process.env.EFI_CLIENT_SECRET || 'Client_Secret_e9cff9d6d9049c89a923fb86192c2ff0194adb08';
+const EFI_BASE_URL = 'https://api-pix.gerencianet.com.br';
+
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -26,10 +32,124 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 // Cache
 let cache = {
     products: null,
-    productsTimestamp: 0
+    productsTimestamp: 0,
+    accessToken: null,
+    tokenExpires: 0
 };
 
 const CACHE_DURATION = 2 * 60 * 1000;
+
+// Função para obter access token da Efi
+async function getEfiAccessToken() {
+    try {
+        // Verificar se temos um token válido no cache
+        if (cache.accessToken && Date.now() < cache.tokenExpires) {
+            return cache.accessToken;
+        }
+
+        const credentials = Buffer.from(`${EFI_CLIENT_ID}:${EFI_CLIENT_SECRET}`).toString('base64');
+        
+        const response = await axios.post(`${EFI_BASE_URL}/oauth/token`, 
+            'grant_type=client_credentials',
+            {
+                headers: {
+                    'Authorization': `Basic ${credentials}`,
+                    'Content-Type': 'application/x-www-form-urlencoded'
+                }
+            }
+        );
+
+        cache.accessToken = response.data.access_token;
+        cache.tokenExpires = Date.now() + (response.data.expires_in * 1000) - 60000; // 1 minuto de margem
+        
+        console.log('✅ Token Efi obtido com sucesso');
+        return cache.accessToken;
+    } catch (error) {
+        console.error('❌ Erro ao obter token Efi:', error.response?.data || error.message);
+        throw error;
+    }
+}
+
+// Função para criar cobrança PIX
+async function createPixCharge(amount, customerInfo) {
+    try {
+        const accessToken = await getEfiAccessToken();
+        
+        // Formatar valor para PIX (em centavos)
+        const valor = Math.round(amount * 100);
+        
+        const payload = {
+            calendario: {
+                expiracao: 3600 // 1 hora
+            },
+            valor: {
+                original: valor.toFixed(2)
+            },
+            chave: '125.707.164-56', // Sua chave PIX
+            infoAdicionais: [
+                {
+                    nome: 'Pedido',
+                    valor: `Pedido Dona Brookies - ${customerInfo.name}`
+                },
+                {
+                    nome: 'Tipo',
+                    valor: customerInfo.deliveryType === 'entrega' ? 'Entrega' : 'Retirada'
+                }
+            ]
+        };
+
+        const response = await axios.post(`${EFI_BASE_URL}/v2/cob`, payload, {
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        console.log('✅ Cobrança PIX criada:', response.data.txid);
+        return response.data;
+    } catch (error) {
+        console.error('❌ Erro ao criar cobrança PIX:', error.response?.data || error.message);
+        throw error;
+    }
+}
+
+// Função para gerar QR Code
+async function generateQRCode(locationId) {
+    try {
+        const accessToken = await getEfiAccessToken();
+        
+        const response = await axios.get(`${EFI_BASE_URL}/v2/loc/${locationId}/qrcode`, {
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        return response.data;
+    } catch (error) {
+        console.error('❌ Erro ao gerar QR Code:', error.response?.data || error.message);
+        throw error;
+    }
+}
+
+// Função para verificar status do pagamento
+async function checkPaymentStatus(txid) {
+    try {
+        const accessToken = await getEfiAccessToken();
+        
+        const response = await axios.get(`${EFI_BASE_URL}/v2/cob/${txid}`, {
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        return response.data;
+    } catch (error) {
+        console.error('❌ Erro ao verificar status:', error.response?.data || error.message);
+        throw error;
+    }
+}
 
 // Função para criptografar
 function simpleEncrypt(text) {
@@ -552,6 +672,187 @@ app.post("/api/orders/update-stock", async (req, res) => {
     }
 });
 
+// NOVO ENDPOINT: Criar pedido com PIX
+app.post("/api/orders/create-pix", async (req, res) => {
+    try {
+        const { items, customer, total } = req.body;
+        
+        console.log('💰 Criando pedido com PIX:', total);
+        
+        if (!items || !Array.isArray(items) || items.length === 0) {
+            return res.status(400).json({ error: "Carrinho vazio" });
+        }
+
+        if (!customer || !customer.name) {
+            return res.status(400).json({ error: "Dados do cliente incompletos" });
+        }
+
+        // Criar cobrança PIX
+        const charge = await createPixCharge(total, customer);
+        
+        // Gerar QR Code
+        const qrCode = await generateQRCode(charge.loc.id);
+        
+        // Salvar pedido no banco
+        const orderData = {
+            items,
+            customer,
+            total,
+            pix_data: {
+                txid: charge.txid,
+                location_id: charge.loc.id,
+                qr_code: qrCode.qrcode,
+                qr_code_image: qrCode.imagemQrcode,
+                status: 'pending',
+                created_at: new Date().toISOString()
+            }
+        };
+
+        const { data: order, error } = await supabase
+            .from('orders')
+            .insert([orderData])
+            .select()
+            .single();
+
+        if (error) {
+            console.error('❌ Erro ao salvar pedido:', error);
+            throw error;
+        }
+
+        console.log('✅ Pedido criado com sucesso:', order.id);
+
+        res.json({
+            success: true,
+            order_id: order.id,
+            pix_data: {
+                qr_code: qrCode.qrcode,
+                qr_code_image: qrCode.imagemQrcode,
+                txid: charge.txid,
+                location_id: charge.loc.id,
+                valor: total,
+                expiracao: charge.calendario.expiracao
+            }
+        });
+
+    } catch (error) {
+        console.error("❌ Erro ao criar pedido PIX:", error);
+        res.status(500).json({ 
+            error: "Erro ao criar pedido: " + (error.response?.data?.mensagem || error.message) 
+        });
+    }
+});
+
+// NOVO ENDPOINT: Verificar status do pagamento
+app.get("/api/orders/:orderId/status", async (req, res) => {
+    try {
+        const { orderId } = req.params;
+        
+        console.log('🔍 Verificando status do pedido:', orderId);
+
+        const { data: order, error } = await supabase
+            .from('orders')
+            .select('*')
+            .eq('id', orderId)
+            .single();
+
+        if (error || !order) {
+            return res.status(404).json({ error: "Pedido não encontrado" });
+        }
+
+        // Verificar status na Efi
+        const paymentStatus = await checkPaymentStatus(order.pix_data.txid);
+        
+        // Atualizar status do pedido se necessário
+        if (paymentStatus.status !== order.pix_data.status) {
+            const { error: updateError } = await supabase
+                .from('orders')
+                .update({ 
+                    'pix_data.status': paymentStatus.status,
+                    updated_at: new Date().toISOString()
+                })
+                .eq('id', orderId);
+
+            if (updateError) {
+                console.error('❌ Erro ao atualizar status:', updateError);
+            }
+
+            // Se pagamento confirmado, atualizar estoque
+            if (paymentStatus.status === 'CONCLUIDA') {
+                try {
+                    await updateStockForOrder(order.items);
+                    console.log('✅ Estoque atualizado para pedido pago:', orderId);
+                } catch (stockError) {
+                    console.error('⚠️ Erro ao atualizar estoque:', stockError);
+                }
+            }
+        }
+
+        res.json({
+            success: true,
+            status: paymentStatus.status,
+            order_id: orderId,
+            paid_at: paymentStatus.horario || null
+        });
+
+    } catch (error) {
+        console.error("❌ Erro ao verificar status:", error);
+        res.status(500).json({ 
+            error: "Erro ao verificar status: " + error.message 
+        });
+    }
+});
+
+// NOVO ENDPOINT: Webhook para notificações PIX
+app.post("/api/webhook/pix", async (req, res) => {
+    try {
+        const notification = req.body;
+        console.log('🔔 Webhook PIX recebido:', notification);
+        
+        // Buscar pedido pelo txid
+        const { data: orders, error } = await supabase
+            .from('orders')
+            .select('*')
+            .eq('pix_data->>txid', notification.txid);
+
+        if (error || !orders || orders.length === 0) {
+            console.log('❌ Pedido não encontrado para txid:', notification.txid);
+            return res.status(404).json({ error: "Pedido não encontrado" });
+        }
+
+        const order = orders[0];
+
+        // Atualizar status do pedido
+        const { error: updateError } = await supabase
+            .from('orders')
+            .update({ 
+                'pix_data.status': 'CONCLUIDA',
+                'pix_data.paid_at': new Date().toISOString(),
+                updated_at: new Date().toISOString()
+            })
+            .eq('id', order.id);
+
+        if (updateError) {
+            console.error('❌ Erro ao atualizar pedido:', updateError);
+            return res.status(500).json({ error: "Erro ao atualizar pedido" });
+        }
+
+        // Atualizar estoque
+        try {
+            await updateStockForOrder(order.items);
+            console.log('✅ Estoque atualizado via webhook para pedido:', order.id);
+        } catch (stockError) {
+            console.error('⚠️ Erro ao atualizar estoque via webhook:', stockError);
+        }
+
+        console.log('✅ Pedido atualizado via webhook:', order.id);
+        res.json({ success: true });
+
+    } catch (error) {
+        console.error("❌ Erro no webhook:", error);
+        res.status(500).json({ error: "Erro no webhook" });
+    }
+});
+
 // Adicionar categoria
 app.post("/api/categories/add", async (req, res) => {
     try {
@@ -743,12 +1044,13 @@ app.get("/api/auth/verify", async (req, res) => {
 // Health check
 app.get("/", (req, res) => {
     res.json({ 
-        message: "🚀 Backend Urban Z SABORES está funcionando!", 
+        message: "🚀 Backend Dona Brookies com PIX está funcionando!", 
         status: "OK",
-        cache: "Ativo apenas para produtos",
-        performance: "Turbo",
-        categorias: "SEM CACHE - Sempre atualizadas",
-        estoque: "Sistema otimizado para múltiplos itens ATIVADO"
+        features: {
+            pix: "Ativo",
+            webhook: "Configurado",
+            stock_management: "Ativo"
+        }
     });
 });
 
@@ -839,11 +1141,9 @@ app.post("/api/cache/refresh", async (req, res) => {
 // Inicializar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-    console.log(`🚀 Servidor SABORES OTIMIZADO rodando em http://localhost:${PORT}`);
-    console.log(`💾 Cache ativo APENAS para produtos: ${CACHE_DURATION/1000}s`);
-    console.log(`✅ Categorias SEM CACHE - sempre atualizadas`);
-    console.log(`🔄 Sistema de estoque OTIMIZADO para múltiplos itens ATIVADO`);
-    console.log(`📊 Nova função de atualização em lote implementada`);
+    console.log(`🚀 Servidor DONA BROOKIES com PIX rodando em http://localhost:${PORT}`);
+    console.log(`💰 Sistema PIX dinâmico ATIVO`);
+    console.log(`🔔 Webhook configurado para notificações automáticas`);
     
     // Garantir que as credenciais existem
     await ensureAdminCredentials();

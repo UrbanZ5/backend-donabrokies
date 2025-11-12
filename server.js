@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { createClient } from '@supabase/supabase-js';
-import webPush from 'web-push';
 
 dotenv.config();
 
@@ -19,18 +18,6 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Configurar VAPID keys para notificações push
-const vapidKeys = {
-  publicKey: process.env.VAPID_PUBLIC_KEY || 'BEoFZR9wXqL2T7m4N1kP8vG3cH6jY5xW0zQaSbRdCfEuItMnOgVlXiKhJpLyAwU',
-  privateKey: process.env.VAPID_PRIVATE_KEY || 'uF2tV8wY4zQ7mXp1K9rC3hJ6gN0bL5vE'
-};
-
-webPush.setVapidDetails(
-  'mailto:contato@donabrookies.com',
-  vapidKeys.publicKey,
-  vapidKeys.privateKey
-);
-
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -43,9 +30,6 @@ let cache = {
 };
 
 const CACHE_DURATION = 2 * 60 * 1000;
-
-// Armazenar subscriptions (em produção, use um banco de dados)
-let pushSubscriptions = [];
 
 // Função para criptografar
 function simpleEncrypt(text) {
@@ -213,7 +197,6 @@ async function updateStockForOrder(items) {
 
         // Atualizar estoque na memória
         const updates = [];
-        const stockUpdates = [];
 
         items.forEach(orderItem => {
             const product = productsMap.get(orderItem.id);
@@ -496,143 +479,7 @@ app.post("/api/orders/update-stock", async (req, res) => {
     }
 });
 
-// ===== NOVOS ENDPOINTS PARA PWA =====
-
-// Endpoint para receber subscriptions de notificação push
-app.post("/api/push/subscribe", async (req, res) => {
-    try {
-        const { subscription } = req.body;
-        
-        if (!subscription) {
-            return res.status(400).json({ error: "Subscription é obrigatória" });
-        }
-
-        // Verificar se já existe
-        const exists = pushSubscriptions.some(sub => 
-            sub.endpoint === subscription.endpoint
-        );
-
-        if (!exists) {
-            pushSubscriptions.push(subscription);
-            console.log('✅ Nova subscription adicionada:', subscription.endpoint);
-        }
-
-        res.json({ success: true, message: "Subscription registrada" });
-    } catch (error) {
-        console.error("❌ Erro ao registrar subscription:", error);
-        res.status(500).json({ error: "Erro ao registrar subscription" });
-    }
-});
-
-// Endpoint para enviar notificações push
-app.post("/api/push/send", async (req, res) => {
-    try {
-        const { title, body, image, url } = req.body;
-        
-        if (!title) {
-            return res.status(400).json({ error: "Título é obrigatório" });
-        }
-
-        console.log(`📢 Enviando notificação para ${pushSubscriptions.length} dispositivos`);
-
-        const payload = JSON.stringify({
-            title: title,
-            body: body || "Nova notificação da Dona Brookies!",
-            image: image,
-            url: url || "/"
-        });
-
-        // Enviar para todas as subscriptions
-        const results = await Promise.allSettled(
-            pushSubscriptions.map(subscription =>
-                webPush.sendNotification(subscription, payload)
-                    .catch(error => {
-                        // Remover subscriptions inválidas
-                        if (error.statusCode === 410) {
-                            pushSubscriptions = pushSubscriptions.filter(
-                                sub => sub.endpoint !== subscription.endpoint
-                            );
-                            console.log('🗑️ Subscription removida:', subscription.endpoint);
-                        }
-                        throw error;
-                    })
-            )
-        );
-
-        const successful = results.filter(result => result.status === 'fulfilled').length;
-        const failed = results.filter(result => result.status === 'rejected').length;
-
-        console.log(`📊 Notificações: ${successful} enviadas, ${failed} falhas`);
-
-        res.json({ 
-            success: true, 
-            message: `Notificação enviada para ${successful} dispositivos`,
-            successful,
-            failed
-        });
-
-    } catch (error) {
-        console.error("❌ Erro ao enviar notificação:", error);
-        res.status(500).json({ error: "Erro ao enviar notificação" });
-    }
-});
-
-// Endpoint para notificar sobre novos produtos
-app.post("/api/push/new-product", async (req, res) => {
-    try {
-        const { productName, productImage, productUrl } = req.body;
-        
-        const payload = {
-            title: "🍫 Novo Produto Disponível!",
-            body: `Confira nosso novo ${productName}`,
-            image: productImage,
-            url: productUrl || "/"
-        };
-
-        // Reutilizar o endpoint de envio
-        const notificationRes = await fetch(`http://localhost:${PORT}/api/push/send`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-
-        const result = await notificationRes.json();
-        
-        res.json(result);
-    } catch (error) {
-        console.error("❌ Erro ao notificar novo produto:", error);
-        res.status(500).json({ error: "Erro ao notificar novo produto" });
-    }
-});
-
-// Endpoint para notificar sobre promoções
-app.post("/api/push/promotion", async (req, res) => {
-    try {
-        const { title, message, image, url } = req.body;
-        
-        const payload = {
-            title: title || "🎉 Promoção Especial!",
-            body: message || "Aproveite nossas ofertas especiais",
-            image: image,
-            url: url || "/"
-        };
-
-        const notificationRes = await fetch(`http://localhost:${PORT}/api/push/send`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
-        });
-
-        const result = await notificationRes.json();
-        
-        res.json(result);
-    } catch (error) {
-        console.error("❌ Erro ao notificar promoção:", error);
-        res.status(500).json({ error: "Erro ao notificar promoção" });
-    }
-});
-
-// Endpoints existentes continuam aqui...
+// Adicionar categoria
 app.post("/api/categories/add", async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -672,6 +519,7 @@ app.post("/api/categories/add", async (req, res) => {
     }
 });
 
+// Excluir categoria
 app.delete("/api/categories/:categoryId", async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -749,6 +597,7 @@ app.delete("/api/categories/:categoryId", async (req, res) => {
     }
 });
 
+// Salvar categorias
 app.post("/api/categories", async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -802,6 +651,7 @@ app.post("/api/categories", async (req, res) => {
     }
 });
 
+// Verificar autenticação
 app.get("/api/auth/verify", async (req, res) => {
     try {
         const token = req.headers.authorization?.replace("Bearer ", "");
@@ -817,17 +667,18 @@ app.get("/api/auth/verify", async (req, res) => {
     }
 });
 
-// Health check atualizado
+// Health check
 app.get("/", (req, res) => {
     res.json({ 
-        message: "🚀 Backend Dona Brookies PWA está funcionando!", 
+        message: "🚀 Backend Dona Brookies está funcionando!", 
         status: "OK",
-        pwa: "Sistema de notificações ativo",
-        subscriptions: pushSubscriptions.length,
+        pwa: "Sistema básico - sem notificações push",
+        cache: "Ativo para produtos",
         performance: "Turbo"
     });
 });
 
+// Endpoint para limpar cache
 app.post("/api/cache/clear", (req, res) => {
     clearCache();
     res.json({ success: true, message: "Cache de produtos limpo com sucesso" });
@@ -836,10 +687,9 @@ app.post("/api/cache/clear", (req, res) => {
 // Inicializar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-    console.log(`🚀 Servidor DONA BROOKIES PWA rodando em http://localhost:${PORT}`);
-    console.log(`📱 Sistema PWA completo com notificações push`);
-    console.log(`🔔 ${pushSubscriptions.length} dispositivos inscritos para notificações`);
-    console.log(`💾 Cache ativo para produtos: ${CACHE_DURATION/1000}s`);
+    console.log(`🚀 Servidor DONA BROOKIES rodando em http://localhost:${PORT}`);
+    console.log(`💾 Sistema básico - sem notificações push`);
+    console.log(`✅ Cache ativo para produtos: ${CACHE_DURATION/1000}s`);
     
     // Garantir que as credenciais existem
     await ensureAdminCredentials();

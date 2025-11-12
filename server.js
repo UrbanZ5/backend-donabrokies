@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { createClient } from '@supabase/supabase-js';
+import webPush from 'web-push';
 
 dotenv.config();
 
@@ -18,6 +19,18 @@ if (!supabaseUrl || !supabaseKey) {
 
 const supabase = createClient(supabaseUrl, supabaseKey);
 
+// Configurar VAPID keys para notificações push
+const vapidKeys = {
+  publicKey: process.env.VAPID_PUBLIC_KEY || 'BEoFZR9wXqL2T7m4N1kP8vG3cH6jY5xW0zQaSbRdCfEuItMnOgVlXiKhJpLyAwU',
+  privateKey: process.env.VAPID_PRIVATE_KEY || 'uF2tV8wY4zQ7mXp1K9rC3hJ6gN0bL5vE'
+};
+
+webPush.setVapidDetails(
+  'mailto:contato@donabrookies.com',
+  vapidKeys.publicKey,
+  vapidKeys.privateKey
+);
+
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
@@ -30,6 +43,9 @@ let cache = {
 };
 
 const CACHE_DURATION = 2 * 60 * 1000;
+
+// Armazenar subscriptions (em produção, use um banco de dados)
+let pushSubscriptions = [];
 
 // Função para criptografar
 function simpleEncrypt(text) {
@@ -64,7 +80,7 @@ function normalizeCategories(categories) {
     }).filter(cat => cat !== null);
 }
 
-// Normalizar produtos - CORREÇÃO: Garantir que estoque zero mostre "Esgotado" E ordenar sabores disponíveis primeiro
+// Normalizar produtos
 function normalizeProducts(products) {
     if (!Array.isArray(products)) return [];
     
@@ -82,24 +98,11 @@ function normalizeProducts(products) {
             };
         }
         
-        // Se já tem sabores, garantir que está no formato correto E ORDENAR SABORES DISPONÍVEIS PRIMEIRO
+        // Se já tem sabores, garantir que está no formato correto
         if (product.sabores && Array.isArray(product.sabores)) {
-            // CORREÇÃO: Ordenar sabores - disponíveis primeiro, esgotados depois
-            const sortedSabores = [...product.sabores].sort((a, b) => {
-                const aStock = a.quantity || 0;
-                const bStock = b.quantity || 0;
-                
-                // Sabores com estoque > 0 vêm primeiro
-                if (aStock > 0 && bStock === 0) return -1;
-                if (aStock === 0 && bStock > 0) return 1;
-                
-                // Se ambos têm estoque ou ambos estão esgotados, mantém a ordem original
-                return 0;
-            });
-            
             return {
                 ...product,
-                sabores: sortedSabores.map(sabor => ({
+                sabores: product.sabores.map(sabor => ({
                     name: sabor.name || 'Sem nome',
                     image: sabor.image || 'https://via.placeholder.com/400x300',
                     quantity: sabor.quantity || 0,
@@ -159,25 +162,10 @@ async function ensureAdminCredentials() {
                 console.log('✅ Credenciais admin criadas com sucesso!');
                 console.log('📋 Usuário: admin');
                 console.log('🔑 Senha: admin123');
-                console.log('🔐 Senha criptografada:', encryptedPassword);
                 return true;
             }
         } else {
             console.log('✅ Credenciais admin já existem');
-            console.log('📋 Usuário:', existingCreds.username);
-            console.log('🔑 Senha no banco:', existingCreds.password);
-            console.log('🔐 Senha criptografada no banco:', existingCreds.encrypted_password);
-            
-            // Verificar se a senha criptografada está correta
-            const testPassword = 'admin123';
-            const testEncrypted = simpleEncrypt(testPassword);
-            console.log('🔍 Testando criptografia:', {
-                senha_teste: testPassword,
-                criptografado_teste: testEncrypted,
-                criptografado_banco: existingCreds.encrypted_password,
-                coincide: testEncrypted === existingCreds.encrypted_password
-            });
-            
             return true;
         }
     } catch (error) {
@@ -186,7 +174,7 @@ async function ensureAdminCredentials() {
     }
 }
 
-// NOVA FUNÇÃO: Atualização de estoque OTIMIZADA e CONFIÁVEL
+// Atualização de estoque
 async function updateStockForOrder(items) {
     try {
         console.log('🔄 Iniciando atualização de estoque para pedido com', items.length, 'itens');
@@ -244,16 +232,6 @@ async function updateStockForOrder(items) {
                         newQuantity,
                         quantityOrdered: orderItem.quantity
                     });
-                    
-                    stockUpdates.push({
-                        product_id: product.id,
-                        sabor_index: orderItem.saborIndex,
-                        old_stock: oldQuantity,
-                        new_stock: newQuantity,
-                        quantity_ordered: orderItem.quantity,
-                        product_title: product.title,
-                        sabor_name: sabor.name
-                    });
                 }
             }
         });
@@ -281,24 +259,6 @@ async function updateStockForOrder(items) {
             throw new Error(`Erro ao atualizar produtos: ${updateError.message}`);
         }
 
-        // Registrar histórico de atualizações de estoque
-        if (stockUpdates.length > 0) {
-            try {
-                const { error: historyError } = await supabase
-                    .from('stock_updates_history')
-                    .insert(stockUpdates.map(update => ({
-                        ...update,
-                        updated_at: new Date().toISOString()
-                    })));
-
-                if (historyError) {
-                    console.error('⚠️ Erro ao salvar histórico, mas estoque foi atualizado:', historyError);
-                }
-            } catch (historyError) {
-                console.error('⚠️ Erro no histórico (não crítico):', historyError);
-            }
-        }
-
         console.log('✅ Estoque atualizado com sucesso!');
         console.log(`📋 Resumo: ${updates.length} itens atualizados em ${productsToUpdate.length} produtos`);
 
@@ -317,7 +277,7 @@ async function updateStockForOrder(items) {
 
 // ENDPOINTS DA API
 
-// Autenticação - CORRIGIDA
+// Autenticação
 app.post("/api/auth/login", async (req, res) => {
     try {
         const { username, password } = req.body;
@@ -344,25 +304,10 @@ app.post("/api/auth/login", async (req, res) => {
             return res.status(401).json({ error: "Credenciais inválidas" });
         }
 
-        console.log('🔍 Credencial encontrada:', {
-            usuario: credentials.username,
-            senha_banco: credentials.password,
-            senha_criptografada_banco: credentials.encrypted_password
-        });
-        
-        // Verificar senha em texto plano (mais simples)
+        // Verificar senha
         const isPlainPasswordValid = password === credentials.password;
-        
-        // Verificar senha criptografada
         const encryptedInput = simpleEncrypt(password);
         const isPasswordValid = encryptedInput === credentials.encrypted_password;
-
-        console.log('🔐 Verificação de senha:', {
-            senha_digitada: password,
-            senha_criptografada_digitada: encryptedInput,
-            valida_texto: isPlainPasswordValid,
-            valida_cripto: isPasswordValid
-        });
 
         if (isPasswordValid || isPlainPasswordValid) {
             console.log('✅ Login bem-sucedido para:', username);
@@ -503,7 +448,7 @@ app.post("/api/products", async (req, res) => {
     }
 });
 
-// ENDPOINT OTIMIZADO: Atualizar estoque após pedido - CORRIGIDO E MELHORADO
+// Atualizar estoque após pedido
 app.post("/api/orders/update-stock", async (req, res) => {
     try {
         const { items } = req.body;
@@ -529,7 +474,7 @@ app.post("/api/orders/update-stock", async (req, res) => {
 
         console.log(`📦 Processando ${validItems.length} itens válidos de ${items.length} totais`);
 
-        // Usar a nova função otimizada
+        // Usar a função otimizada
         const result = await updateStockForOrder(validItems);
 
         // Limpar cache para forçar recarregamento
@@ -542,7 +487,6 @@ app.post("/api/orders/update-stock", async (req, res) => {
         console.error("❌ Erro ao atualizar estoque:", error);
         
         // Mesmo com erro, retornar sucesso para não bloquear WhatsApp
-        // Mas com flag indicando que houve problema
         res.json({ 
             success: true, 
             message: "Pedido processado, mas estoque pode precisar de verificação manual",
@@ -552,7 +496,143 @@ app.post("/api/orders/update-stock", async (req, res) => {
     }
 });
 
-// Adicionar categoria
+// ===== NOVOS ENDPOINTS PARA PWA =====
+
+// Endpoint para receber subscriptions de notificação push
+app.post("/api/push/subscribe", async (req, res) => {
+    try {
+        const { subscription } = req.body;
+        
+        if (!subscription) {
+            return res.status(400).json({ error: "Subscription é obrigatória" });
+        }
+
+        // Verificar se já existe
+        const exists = pushSubscriptions.some(sub => 
+            sub.endpoint === subscription.endpoint
+        );
+
+        if (!exists) {
+            pushSubscriptions.push(subscription);
+            console.log('✅ Nova subscription adicionada:', subscription.endpoint);
+        }
+
+        res.json({ success: true, message: "Subscription registrada" });
+    } catch (error) {
+        console.error("❌ Erro ao registrar subscription:", error);
+        res.status(500).json({ error: "Erro ao registrar subscription" });
+    }
+});
+
+// Endpoint para enviar notificações push
+app.post("/api/push/send", async (req, res) => {
+    try {
+        const { title, body, image, url } = req.body;
+        
+        if (!title) {
+            return res.status(400).json({ error: "Título é obrigatório" });
+        }
+
+        console.log(`📢 Enviando notificação para ${pushSubscriptions.length} dispositivos`);
+
+        const payload = JSON.stringify({
+            title: title,
+            body: body || "Nova notificação da Dona Brookies!",
+            image: image,
+            url: url || "/"
+        });
+
+        // Enviar para todas as subscriptions
+        const results = await Promise.allSettled(
+            pushSubscriptions.map(subscription =>
+                webPush.sendNotification(subscription, payload)
+                    .catch(error => {
+                        // Remover subscriptions inválidas
+                        if (error.statusCode === 410) {
+                            pushSubscriptions = pushSubscriptions.filter(
+                                sub => sub.endpoint !== subscription.endpoint
+                            );
+                            console.log('🗑️ Subscription removida:', subscription.endpoint);
+                        }
+                        throw error;
+                    })
+            )
+        );
+
+        const successful = results.filter(result => result.status === 'fulfilled').length;
+        const failed = results.filter(result => result.status === 'rejected').length;
+
+        console.log(`📊 Notificações: ${successful} enviadas, ${failed} falhas`);
+
+        res.json({ 
+            success: true, 
+            message: `Notificação enviada para ${successful} dispositivos`,
+            successful,
+            failed
+        });
+
+    } catch (error) {
+        console.error("❌ Erro ao enviar notificação:", error);
+        res.status(500).json({ error: "Erro ao enviar notificação" });
+    }
+});
+
+// Endpoint para notificar sobre novos produtos
+app.post("/api/push/new-product", async (req, res) => {
+    try {
+        const { productName, productImage, productUrl } = req.body;
+        
+        const payload = {
+            title: "🍫 Novo Produto Disponível!",
+            body: `Confira nosso novo ${productName}`,
+            image: productImage,
+            url: productUrl || "/"
+        };
+
+        // Reutilizar o endpoint de envio
+        const notificationRes = await fetch(`http://localhost:${PORT}/api/push/send`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        const result = await notificationRes.json();
+        
+        res.json(result);
+    } catch (error) {
+        console.error("❌ Erro ao notificar novo produto:", error);
+        res.status(500).json({ error: "Erro ao notificar novo produto" });
+    }
+});
+
+// Endpoint para notificar sobre promoções
+app.post("/api/push/promotion", async (req, res) => {
+    try {
+        const { title, message, image, url } = req.body;
+        
+        const payload = {
+            title: title || "🎉 Promoção Especial!",
+            body: message || "Aproveite nossas ofertas especiais",
+            image: image,
+            url: url || "/"
+        };
+
+        const notificationRes = await fetch(`http://localhost:${PORT}/api/push/send`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        const result = await notificationRes.json();
+        
+        res.json(result);
+    } catch (error) {
+        console.error("❌ Erro ao notificar promoção:", error);
+        res.status(500).json({ error: "Erro ao notificar promoção" });
+    }
+});
+
+// Endpoints existentes continuam aqui...
 app.post("/api/categories/add", async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -592,7 +672,6 @@ app.post("/api/categories/add", async (req, res) => {
     }
 });
 
-// Excluir categoria
 app.delete("/api/categories/:categoryId", async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -670,7 +749,6 @@ app.delete("/api/categories/:categoryId", async (req, res) => {
     }
 });
 
-// Salvar categorias
 app.post("/api/categories", async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -724,7 +802,6 @@ app.post("/api/categories", async (req, res) => {
     }
 });
 
-// Verificar autenticação
 app.get("/api/auth/verify", async (req, res) => {
     try {
         const token = req.headers.authorization?.replace("Bearer ", "");
@@ -740,110 +817,29 @@ app.get("/api/auth/verify", async (req, res) => {
     }
 });
 
-// Health check
+// Health check atualizado
 app.get("/", (req, res) => {
     res.json({ 
-        message: "🚀 Backend Urban Z SABORES está funcionando!", 
+        message: "🚀 Backend Dona Brookies PWA está funcionando!", 
         status: "OK",
-        cache: "Ativo apenas para produtos",
-        performance: "Turbo",
-        categorias: "SEM CACHE - Sempre atualizadas",
-        estoque: "Sistema otimizado para múltiplos itens ATIVADO"
+        pwa: "Sistema de notificações ativo",
+        subscriptions: pushSubscriptions.length,
+        performance: "Turbo"
     });
 });
 
-// Endpoint para limpar cache
 app.post("/api/cache/clear", (req, res) => {
     clearCache();
     res.json({ success: true, message: "Cache de produtos limpo com sucesso" });
 });
 
-// Endpoint para ver categorias do banco (debug)
-app.get("/api/debug/categories", async (req, res) => {
-    try {
-        const { data: categories, error } = await supabase
-            .from('categories')
-            .select('*')
-            .order('name');
-        
-        if (error) throw error;
-        
-        res.json({ 
-            categories: categories || [],
-            count: categories ? categories.length : 0 
-        });
-    } catch (error) {
-        res.json({ categories: [], error: error.message });
-    }
-});
-
-// Endpoint para ver credenciais (debug)
-app.get("/api/debug/credentials", async (req, res) => {
-    try {
-        const { data: credentials, error } = await supabase
-            .from('admin_credentials')
-            .select('*');
-        
-        if (error) throw error;
-        
-        res.json({ 
-            credentials: credentials || [],
-            count: credentials ? credentials.length : 0 
-        });
-    } catch (error) {
-        res.json({ credentials: [], error: error.message });
-    }
-});
-
-// Endpoint para testar criptografia
-app.get("/api/debug/encrypt/:text", (req, res) => {
-    const text = req.params.text;
-    const encrypted = simpleEncrypt(text);
-    res.json({
-        original: text,
-        encrypted: encrypted,
-        decrypted: simpleDecrypt(encrypted)
-    });
-});
-
-// NOVO ENDPOINT: Forçar atualização de cache
-app.post("/api/cache/refresh", async (req, res) => {
-    try {
-        clearCache();
-        
-        // Recarregar produtos para repopular cache
-        const { data: products, error } = await supabase
-            .from('products')
-            .select('*')
-            .order('display_order', { ascending: true, nullsFirst: false })
-            .order('id');
-
-        if (error) {
-            throw error;
-        }
-
-        cache.products = normalizeProducts(products || []);
-        cache.productsTimestamp = Date.now();
-
-        res.json({ 
-            success: true, 
-            message: "Cache recarregado com sucesso",
-            products_count: cache.products.length 
-        });
-    } catch (error) {
-        console.error("❌ Erro ao recarregar cache:", error);
-        res.status(500).json({ error: "Erro ao recarregar cache: " + error.message });
-    }
-});
-
 // Inicializar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-    console.log(`🚀 Servidor SABORES OTIMIZADO rodando em http://localhost:${PORT}`);
-    console.log(`💾 Cache ativo APENAS para produtos: ${CACHE_DURATION/1000}s`);
-    console.log(`✅ Categorias SEM CACHE - sempre atualizadas`);
-    console.log(`🔄 Sistema de estoque OTIMIZADO para múltiplos itens ATIVADO`);
-    console.log(`📊 Nova função de atualização em lote implementada`);
+    console.log(`🚀 Servidor DONA BROOKIES PWA rodando em http://localhost:${PORT}`);
+    console.log(`📱 Sistema PWA completo com notificações push`);
+    console.log(`🔔 ${pushSubscriptions.length} dispositivos inscritos para notificações`);
+    console.log(`💾 Cache ativo para produtos: ${CACHE_DURATION/1000}s`);
     
     // Garantir que as credenciais existem
     await ensureAdminCredentials();

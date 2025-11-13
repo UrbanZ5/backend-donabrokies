@@ -2,16 +2,10 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { createClient } from '@supabase/supabase-js';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
 dotenv.config();
 
 const app = express();
-
-// Configuração para ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 // Configuração do Supabase
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -28,9 +22,6 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-
-// Servir arquivos estáticos do PWA
-app.use(express.static(path.join(__dirname, 'public')));
 
 // Cache
 let cache = {
@@ -752,13 +743,12 @@ app.get("/api/auth/verify", async (req, res) => {
 // Health check
 app.get("/", (req, res) => {
     res.json({ 
-        message: "🚀 Backend Dona Brookies PWA está funcionando!", 
+        message: "🚀 Backend Urban Z SABORES está funcionando!", 
         status: "OK",
         cache: "Ativo apenas para produtos",
         performance: "Turbo",
         categorias: "SEM CACHE - Sempre atualizadas",
-        estoque: "Sistema otimizado para múltiplos itens ATIVADO",
-        pwa: "✅ Configurado para Progressive Web App"
+        estoque: "Sistema otimizado para múltiplos itens ATIVADO"
     });
 });
 
@@ -846,45 +836,14 @@ app.post("/api/cache/refresh", async (req, res) => {
     }
 });
 
-// Rota para o service worker (deve ser servido da raiz)
-app.get('/sw.js', (req, res) => {
-    res.sendFile(path.join(__dirname, 'sw.js'), {
-        headers: {
-            'Content-Type': 'application/javascript',
-            'Service-Worker-Allowed': '/'
-        }
-    });
-});
-
-// Rota para o manifest
-app.get('/manifest.json', (req, res) => {
-    res.sendFile(path.join(__dirname, 'manifest.json'), {
-        headers: {
-            'Content-Type': 'application/json'
-        }
-    });
-});
-
-// Rota para ícones
-app.get('/icons/:iconName', (req, res) => {
-    const iconName = req.params.iconName;
-    res.sendFile(path.join(__dirname, 'icons', iconName));
-});
-
-// Todas as outras rotas servem o index.html (para SPA)
-app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-
 // Inicializar servidor
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, async () => {
-    console.log(`🚀 Servidor DONA BROOKIES PWA rodando em http://localhost:${PORT}`);
+    console.log(`🚀 Servidor SABORES OTIMIZADO rodando em http://localhost:${PORT}`);
     console.log(`💾 Cache ativo APENAS para produtos: ${CACHE_DURATION/1000}s`);
     console.log(`✅ Categorias SEM CACHE - sempre atualizadas`);
     console.log(`🔄 Sistema de estoque OTIMIZADO para múltiplos itens ATIVADO`);
     console.log(`📊 Nova função de atualização em lote implementada`);
-    console.log(`🎯 PWA Configurado: Service Worker, Manifest e Ícones`);
     
     // Garantir que as credenciais existem
     await ensureAdminCredentials();
